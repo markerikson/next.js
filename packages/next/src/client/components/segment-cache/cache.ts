@@ -1,5 +1,5 @@
+import type { CacheNode, Segment } from '../../../shared/lib/app-router-types'
 import type React from 'react'
-import type { Segment as FlightRouterStateSegment } from '../../../shared/lib/app-router-types'
 import { PrefetchHint } from '../../../shared/lib/app-router-types'
 import type { VaryParams } from '../../../shared/lib/segment-cache/vary-params-decoding'
 import { readFulfilledValue } from '../../../shared/lib/rsc-transport'
@@ -194,9 +194,9 @@ export type RSCSegmentData = {
 
 type RouteTreeShared<TData> = {
   requestKey: SegmentRequestKey
-  // TODO: Remove the `segment` field, now that it can be reconstructed
-  // from `param`.
-  segment: FlightRouterStateSegment
+  // Structural segment identity. Page segments are bare; their query
+  // identity lives in varyPath. Legacy wire strings are built at the boundary.
+  segment: Segment
   // The vary path used for shell-scoped keying of this segment: the
   // segment's vary path with every non-root param replaced with Fallback
   // (see getShellSegmentVaryPath), so one shell-tier entry serves all param
@@ -204,14 +204,11 @@ type RouteTreeShared<TData> = {
   // don't have to recompute it on every shell request.
   shellVaryPath: SegmentVaryPath
   refreshState: RefreshState | null
-  // Render output for this segment, when the tree was created from a server
-  // response that rendered it. The type parameter encodes a lifecycle
-  // invariant: trees stored long-term in the route cache
-  // (RouteCacheEntry.tree / .metadata) are RouteTree<null> — structure only —
-  // so RSC payloads can never be pinned in memory outside the segment
-  // cache's eviction control. Trees that carry data must be transient:
-  // created for a navigation or cache-write, then dropped once the data is
-  // transferred into CacheNodes / SegmentCacheEntries.
+  // The payload distinguishes ownership/lifetime without changing structure:
+  // - RouteTree<null>: cached route structure.
+  // - RouteTree<RSCSegmentData | null>: a decoded server response.
+  // - RouteTree<CacheNode>: an active or retained render tree.
+  // Render payloads must not escape into the long-lived route cache.
   data: TData
   // Keyed by parallel route slot name. Stored as a Map rather than a plain
   // object because slot names are app-defined; with a plain object, every
@@ -458,7 +455,7 @@ export function getCurrentSegmentCacheVersion(): number {
  */
 export function invalidateEntirePrefetchCache(
   nextUrl: string | null,
-  tree: FlightRouterState
+  tree: RouteTree<CacheNode>
 ): void {
   currentRouteCacheVersion++
   currentSegmentCacheVersion++
@@ -476,7 +473,7 @@ export function invalidateEntirePrefetchCache(
  */
 export function invalidateRouteCacheEntries(
   nextUrl: string | null,
-  tree: FlightRouterState
+  tree: RouteTree<CacheNode>
 ): void {
   currentRouteCacheVersion++
 
@@ -493,7 +490,7 @@ export function invalidateRouteCacheEntries(
  */
 export function invalidateSegmentCacheEntries(
   nextUrl: string | null,
-  tree: FlightRouterState
+  tree: RouteTree<CacheNode>
 ): void {
   currentSegmentCacheVersion++
 
@@ -538,7 +535,7 @@ function notifyInvalidationListener(task: PrefetchTask): void {
 
 export function pingInvalidationListeners(
   nextUrl: string | null,
-  tree: FlightRouterState
+  cache: RouteTree<CacheNode>
 ): void {
   // The rough equivalent of pingVisibleLinks, but for onInvalidate callbacks.
   // This is called when the Next-Url or the base tree changes, since those
@@ -548,7 +545,7 @@ export function pingInvalidationListeners(
     const tasks = invalidationListeners
     invalidationListeners = null
     for (const task of tasks) {
-      if (isPrefetchTaskDirty(task, nextUrl, tree)) {
+      if (isPrefetchTaskDirty(task, nextUrl, cache)) {
         notifyInvalidationListener(task)
       }
     }
@@ -1697,23 +1694,22 @@ export function convertRootFlightRouterStateToRouteTree(
   )
 }
 
-export function convertReusedFlightRouterStateToRouteTree(
-  parentRouteTree: RouteTree<RSCSegmentData | null>,
+export function rebaseInactiveRouteTree<TParent, TData>(
+  parentRouteTree: RouteTree<TParent>,
   parallelRouteKey: string,
-  flightRouterState: FlightRouterState,
+  treeToRebase: RouteTree<TData>,
   renderedSearch: NormalizedSearch,
   acc: RouteTreeAccumulator
-) {
-  // Create a RouteTree for a FlightRouterState that was reused from an older
-  // route. This happens during a navigation when a parallel route slot does not
-  // match the target route; we reuse whatever slot was already active.
+): RouteTree<null> {
+  // Reuse the structure of a retained slot under its target parent. Payloads
+  // belong to the previous render and are reused separately by render-tree.
 
-  // Unlike a FlightRouterState, the RouteTree type contains backreferences to
-  // the parent segments. Append the vary path to the parent's vary path.
+  // Rebuild the retained slot's vary paths under the target parent. Its own
+  // refresh context still selects the search params that rendered it.
   const parentPartialVaryPath = parentRouteTree.isPage
     ? getPartialPageVaryPath(parentRouteTree.varyPath)
     : getPartialLayoutVaryPath(parentRouteTree.varyPath)
-  const segment = flightRouterState[0]
+  const segment = treeToRebase.segment
   // And the request key.
   const parentRequestKey = parentRouteTree.requestKey
   const requestKeyPart = createSegmentRequestKeyPart(segment)
@@ -1722,13 +1718,60 @@ export function convertReusedFlightRouterStateToRouteTree(
     parallelRouteKey,
     requestKeyPart
   )
-  return convertFlightRouterStateToRouteTree(
-    flightRouterState,
+  return rebaseInactiveRouteTreeImpl(
+    treeToRebase,
     requestKey,
     parentPartialVaryPath,
     renderedSearch,
     acc
   )
+}
+
+function rebaseInactiveRouteTreeImpl<TData>(
+  treeToRebase: RouteTree<TData>,
+  requestKey: SegmentRequestKey,
+  parentPartialVaryPath: PartialSegmentVaryPath | null,
+  parentRenderedSearch: NormalizedSearch,
+  acc: RouteTreeAccumulator
+): RouteTree<null> {
+  const refreshState = treeToRebase.refreshState
+  const renderedSearch =
+    refreshState !== null ? refreshState.renderedSearch : parentRenderedSearch
+  const tree = createRouteTreeNode<null>(
+    treeToRebase.segment,
+    (treeToRebase.prefetchHints & PrefetchHint.IsRootLayoutOrAbove) !== 0,
+    requestKey,
+    parentPartialVaryPath,
+    renderedSearch,
+    acc
+  )
+  tree.refreshState = refreshState
+  tree.prefetchHints = treeToRebase.prefetchHints
+  const partialVaryPath = tree.isPage
+    ? getPartialPageVaryPath(tree.varyPath)
+    : getPartialLayoutVaryPath(tree.varyPath)
+  if (treeToRebase.slots !== null) {
+    const slots = new Map<string, RouteTree<null>>()
+    for (const [parallelRouteKey, child] of treeToRebase.slots) {
+      const childRequestKey = appendSegmentRequestKeyPart(
+        requestKey,
+        parallelRouteKey,
+        createSegmentRequestKeyPart(child.segment)
+      )
+      slots.set(
+        parallelRouteKey,
+        rebaseInactiveRouteTreeImpl(
+          child,
+          childRequestKey,
+          partialVaryPath,
+          renderedSearch,
+          acc
+        )
+      )
+    }
+    tree.slots = slots
+  }
+  return tree
 }
 
 export function convertFlightRouterStateToRouteTree(
@@ -1806,8 +1849,8 @@ export function convertFlightRouterStateToRouteTree(
   return tree
 }
 
-export function convertRouteTreeToFlightRouterState(
-  routeTree: RouteTree<RSCSegmentData | null>
+export function convertRouteTreeToFlightRouterState<TData>(
+  routeTree: RouteTree<TData>
 ): FlightRouterState {
   const parallelRoutes: Record<string, FlightRouterState> = {}
   const slots = routeTree.slots
@@ -2736,7 +2779,7 @@ export async function fetchSegmentPrefetchesUsingRuntimeRequest(
       // TODO: Consider also bounding retries with a counter on the task
       // object, so a prefetch that repeatedly fails to settle backs off
       // regardless of the reason.
-      invalidateRouteCacheEntries(key.nextUrl, task.treeAtTimeOfPrefetch)
+      invalidateRouteCacheEntries(key.nextUrl, task.renderTreeAtTimeOfPrefetch)
     }
 
     // Return a promise that resolves when the network connection closes, so
