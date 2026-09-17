@@ -408,6 +408,7 @@ export function ComparePerRoutePanel({
           useCompressed={compressed}
           analyzeData={analyzeData}
           baselineAnalyzeData={baselineAnalyzeData}
+          searchQuery={searchQuery}
           selectedKey={compareSelectedKey}
           onSelectKey={onCompareSelectedKeyChange}
         />
