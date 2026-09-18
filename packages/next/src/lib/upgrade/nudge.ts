@@ -105,7 +105,6 @@ export async function assessUpgrade(
       if (audience === 'interactive') return null
     }
 
-    if (audience === 'interactive') return null
     if (policy !== 'future' || isDismissed('future')) return null
     const pending = getPendingFutureDefaults(context, installedVersion)
     if (pending.length === 0) return null
