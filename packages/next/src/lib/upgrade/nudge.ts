@@ -97,15 +97,15 @@ export async function assessUpgrade(
       )
     }
 
-    if (audience === 'interactive') return null
     if (policy === 'security' || isDismissed('latest')) return null
     try {
       const latestVersion = await getLatestUpgradeVersion(installedVersion)
       if (latestVersion) return { ...nudge, kind: 'latest', latestVersion }
     } catch {
-      // Agent release reminders are best-effort.
+      if (audience === 'interactive') return null
     }
 
+    if (audience === 'interactive') return null
     if (policy !== 'future' || isDismissed('future')) return null
     const pending = getPendingFutureDefaults(context, installedVersion)
     if (pending.length === 0) return null
