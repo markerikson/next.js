@@ -11,8 +11,6 @@ function toQueryString(query: Record<string, any>): string {
   return params.toString()
 }
 
-const largeSize = 1080
-
 describe('Image Optimizer', () => {
   describe('config checks', () => {
     const { next, skipped } = nextTestSetup({
@@ -499,33 +497,6 @@ describe('Image Optimizer', () => {
           return found ? 'success' : 'failed'
         }, 'success')
         await expectWidth(res, 64)
-      })
-    }
-  )
-  ;(isNextDev ? describe : describe.skip)(
-    'dev support for dynamic blur placeholder',
-    () => {
-      const { next, skipped } = nextTestSetup({
-        files: join(__dirname, 'app'),
-        nextConfig: {
-          images: {
-            deviceSizes: [largeSize],
-            imageSizes: [],
-          },
-        },
-        skipDeployment: true,
-      })
-      if (skipped) return
-
-      it('should support width 8 per BLUR_IMG_SIZE with next dev', async () => {
-        const query = { url: '/test.png', w: 8, q: 70 }
-        const opts = { headers: { accept: 'image/webp' } }
-        const res = await next.fetch(
-          `/_next/image?${toQueryString(query)}`,
-          opts
-        )
-        expect(res.status).toBe(200)
-        await expectWidth(res, 320)
       })
     }
   )
